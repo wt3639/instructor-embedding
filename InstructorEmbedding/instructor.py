@@ -12,13 +12,30 @@ from transformers import AutoConfig
 from transformers import AutoTokenizer
 from collections import OrderedDict
 from torch import nn
+from huggingface_hub import snapshot_download
+from sentence_transformers.util import (
+    import_from_string,
+    batch_to_device,
+    load_dir_path,
+    load_file_path,
+)
+
 
 def batch_to_device(batch, target_device: device):
     for key in batch:
         if isinstance(batch[key], Tensor):
             batch[key] = batch[key].to(target_device)
     return batch
-
+from sentence_transformers.util import (
+    import_from_string,
+    batch_to_device,
+    fullname,
+    is_sentence_transformer_model,
+    load_dir_path,
+    load_file_path,
+    save_to_hub_args_decorator,
+    get_device_name,
+)
 
 class INSTRUCTOR_Pooling(nn.Module):
     """Performs pooling (max or mean) on the token embeddings.
@@ -243,6 +260,7 @@ class INSTRUCTOR_Transformer(Transformer):
 
         #No max_seq_length set. Try to infer from model
         # print('max_seq_length ', max_seq_length)
+        max_seq_length = 512
         if max_seq_length is None:
             if hasattr(self.auto_model, "config") and hasattr(self.auto_model.config, "max_position_embeddings") and hasattr(self.tokenizer, "model_max_length"):
                 max_seq_length = min(self.auto_model.config.max_position_embeddings, self.tokenizer.model_max_length)
@@ -299,7 +317,6 @@ class INSTRUCTOR_Transformer(Transformer):
             sbert_config_path = os.path.join(input_path, config_name)
             if os.path.exists(sbert_config_path):
                 break
-
         with open(sbert_config_path) as fIn:
             config = json.load(fIn)
         return INSTRUCTOR_Transformer(model_name_or_path=input_path, **config)
@@ -437,18 +454,33 @@ class INSTRUCTOR(SentenceTransformer):
 
         return sentence_features, labels
 
-    def _load_sbert_model(self, model_path):
+    def _load_sbert_model(self, 
+                          model_name_or_path,
+                          token,
+        cache_folder,
+        revision,
+        trust_remote_code):
         """
         Loads a full sentence-transformers model
         """
+       
+        
         # Check if the config_sentence_transformers.json file exists (exists since v2 of the framework)
-        config_sentence_transformers_json_path = os.path.join(model_path, 'config_sentence_transformers.json')
+        config_sentence_transformers_json_path = load_file_path(
+            model_name_or_path,
+            "config_sentence_transformers.json",
+            token=token,
+            cache_folder=cache_folder,
+            revision=revision,
+        )
         if os.path.exists(config_sentence_transformers_json_path):
             with open(config_sentence_transformers_json_path) as fIn:
                 self._model_config = json.load(fIn)
 
         # Check if a readme exists
-        model_card_path = os.path.join(model_path, 'README.md')
+        model_card_path = load_file_path(
+            model_name_or_path, "README.md", token=token, cache_folder=cache_folder, revision=revision
+        )
         if os.path.exists(model_card_path):
             try:
                 with open(model_card_path, encoding='utf8') as fIn:
@@ -457,7 +489,8 @@ class INSTRUCTOR(SentenceTransformer):
                 pass
 
         # Load the modules of sentence transformer
-        modules_json_path = os.path.join(model_path, 'modules.json')
+        modules_json_path = load_file_path(
+            model_name_or_path, "modules.json", token=token, cache_folder=cache_folder, revision=revision)
         with open(modules_json_path) as fIn:
             modules_config = json.load(fIn)
 
@@ -466,11 +499,26 @@ class INSTRUCTOR(SentenceTransformer):
             if module_config['idx']==0:
                 print('load INSTRUCTOR_Transformer')
                 module_class = INSTRUCTOR_Transformer
+                download_kwargs = {
+        "repo_id": model_name_or_path,
+        "revision": revision,
+        "library_name": "sentence-transformers",
+        "token": token,
+        "cache_dir": cache_folder
+    }
+                snapshot_download(**download_kwargs)
             elif module_config['idx']==1:
                 module_class = INSTRUCTOR_Pooling
             else:
                 module_class = import_from_string(module_config['type'])
-            module = module_class.load(os.path.join(model_path, module_config['path']))
+            module_path = load_dir_path(
+                        model_name_or_path,
+                        module_config["path"],
+                        token=token,
+                        cache_folder=cache_folder,
+                        revision=revision,
+                    )
+            module = module_class.load(module_path)
             modules[module_config['name']] = module
 
         return modules
